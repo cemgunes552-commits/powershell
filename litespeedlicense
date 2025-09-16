@@ -1,0 +1,140 @@
+Write-Host "Script baslatiliyor..." -ForegroundColor Green
+
+# Parametreler
+$ServerListFile = "servers.txt"
+$OutputFile = "litespeed_licenses.txt"
+$SSHPort = portu girin
+
+Write-Host "Parametreler yuklendi" -ForegroundColor Green
+
+# Sunucu listesini oku
+if (-not (Test-Path $ServerListFile)) {
+    Write-Error "Sunucu listesi dosyasi bulunamadi: $ServerListFile"
+    exit 1
+}
+
+Write-Host "Sunucu dosyasi bulundu" -ForegroundColor Green
+
+$servers = Get-Content $ServerListFile | Where-Object { $_.Trim() -ne "" }
+Write-Host "Toplam sunucu sayisi: $($servers.Count)" -ForegroundColor Cyan
+
+# Posh-SSH modulunu yukle
+try {
+    Import-Module Posh-SSH -ErrorAction Stop
+    Write-Host "Posh-SSH modulu yuklendi" -ForegroundColor Green
+} catch {
+    Write-Host "Posh-SSH modulu yuklenemedi: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+# Sifreler
+$passwords = @(
+    "ssh şifre 1",
+    "ssh şifre 2"
+)
+
+Write-Host "Sifre sayisi: $($passwords.Count)" -ForegroundColor Cyan
+
+# Sonuc dosyasini olustur
+"LiteSpeed Lisans Kontrol Sonuclari - $(Get-Date)" | Out-File -FilePath $OutputFile -Encoding UTF8
+"=" * 60 | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+"" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+
+Write-Host "Sonuc dosyasi olusturuldu: $OutputFile" -ForegroundColor Green
+
+$successCount = 0
+$failCount = 0
+
+Write-Host "Sunucu kontrolu baslatiliyor..." -ForegroundColor Yellow
+Write-Host ""
+
+# Tum sunuculari kontrol et
+foreach ($server in $servers) {
+    $server = $server.Trim()
+    if ($server -eq "") { continue }
+    
+    Write-Host "Sunucu kontrol ediliyor: $server" -ForegroundColor Yellow
+    
+    $connected = $false
+    $session = $null
+    
+    foreach ($password in $passwords) {
+        try {
+            Write-Host "  Sifre deneniyor..." -ForegroundColor Gray
+            
+            $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+            $credential = New-Object System.Management.Automation.PSCredential("root", $securePassword)
+            
+            $session = New-SSHSession -ComputerName $server -Port $SSHPort -Credential $credential -AcceptKey -ConnectionTimeout 10
+            
+            if ($session -and $session.Connected) {
+                Write-Host "  SSH baglantisi basarili!" -ForegroundColor Green
+                $connected = $true
+                break
+            }
+        }
+        catch {
+            Write-Host "  Baglanti hatasi: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    
+    if (-not $connected) {
+        Write-Host "  Baglanti kurulamadi" -ForegroundColor Red
+        "$server - BAGLANTI HATASI" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+        $failCount++
+        continue
+    }
+    
+    # Lisans bilgilerini al
+    try {
+        Write-Host "  Lisans bilgileri aliniyor..." -ForegroundColor Gray
+        
+        $serialResult = Invoke-SSHCommand -SessionId $session.SessionId -Command "cat /usr/local/lsws/conf/serial.no 2>/dev/null || echo 'SERIAL_NOT_FOUND'"
+        $versionResult = Invoke-SSHCommand -SessionId $session.SessionId -Command "/usr/local/lsws/bin/lshttpd -v 2>/dev/null | head -1 || echo 'VERSION_NOT_FOUND'"
+        
+        $serialNo = if ($serialResult.Output) { $serialResult.Output.Trim() } else { "SERIAL_NOT_FOUND" }
+        $version = if ($versionResult.Output) { $versionResult.Output.Trim() } else { "VERSION_NOT_FOUND" }
+        
+        if ($serialNo -eq "SERIAL_NOT_FOUND" -or $serialNo -eq "") {
+            $serialNo = "Lisans bulunamadi"
+        }
+        
+        if ($version -eq "VERSION_NOT_FOUND" -or $version -eq "") {
+            $version = "Versiyon bulunamadi"
+        }
+        
+        $output = "IP: $server | Seri No: $serialNo | Versiyon: $version"
+        
+        Write-Host "  Lisans bilgileri alindi" -ForegroundColor Green
+        Write-Host "    $output" -ForegroundColor White
+        
+        $output | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+        $successCount++
+    }
+    catch {
+        Write-Host "  Lisans bilgileri alinamadi: $($_.Exception.Message)" -ForegroundColor Red
+        "$server - LISANS BILGISI ALINAMADI" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+        $failCount++
+    }
+    finally {
+        if ($session -and $session.Connected) {
+            Remove-SSHSession -SessionId $session.SessionId | Out-Null
+        }
+    }
+    
+    Write-Host ""
+}
+
+# Ozet
+"" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+"OZET:" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+"Basarili: $successCount" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+"Basarisiz: $failCount" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+"Test Tarihi: $(Get-Date)" | Out-File -FilePath $OutputFile -Append -Encoding UTF8
+
+Write-Host "=" * 50 -ForegroundColor Cyan
+Write-Host "Test tamamlandi!" -ForegroundColor Green
+Write-Host "Basarili: $successCount" -ForegroundColor Green
+Write-Host "Basarisiz: $failCount" -ForegroundColor Red
+Write-Host "Sonuclar: $OutputFile" -ForegroundColor Cyan
+Write-Host "=" * 50 -ForegroundColor Cyan
